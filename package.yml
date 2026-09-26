@@ -1,0 +1,180 @@
+name: qpdf
+title: qpdf
+summary: Merges, splits, encrypts, decrypts, linearizes and repairs PDF files without changing their content.
+homepage: https://qpdf.sourceforge.io/
+license: Apache-2.0
+upstream:
+  source: github-release
+  repository: qpdf/qpdf
+  # Release tags look like v12.4.1.
+  tag-pattern: '^v(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 12.4.1
+  artifact:
+    url: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.tar.gz
+    # A clearsigned list of the release files and their SHA-256 hashes.
+    checksums:
+      url: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.sha256
+      algorithm: sha256
+    signature: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.tar.gz.asc
+    sha256: f045aa277be2356ff53a89a8622945958291177d2483afc20ede7c8a8cd3873c
+image:
+  entrypoint: [qpdf]
+  cmd: [--help]
+test:
+  - |
+    qpdf --version > version.txt
+    test "$(head -n 1 version.txt)" = "qpdf version $VERSION"
+    test "$(fix-qdf --version)" = "fix-qdf from qpdf version $VERSION"
+    test "$(zlib-flate --version)" = "zlib-flate from qpdf version $VERSION"
+    # OpenSSL is the only crypto provider; qpdf's own AES and SHA-2 code is not built.
+    test "$(qpdf --show-crypto)" = openssl
+    printf 'zlib-flate round trip\n' > text.txt
+    zlib-flate -compress < text.txt > text.z
+    zlib-flate -uncompress < text.z | cmp - text.txt
+  - |
+    # A three-page PDF written from qpdf's JSON format, then split, reordered and merged.
+    for n in 1 2 3; do
+      printf 'BT /F1 24 Tf 72 700 Td (Page %s) Tj ET\n' "$n" > "content-$n.txt"
+    done
+    page() {
+      printf '"obj:%s 0 R": {"value": {"/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792], ' "$1"
+      printf '"/Resources": {"/Font": {"/F1": "9 0 R"}}, "/Contents": "%s 0 R"}},\n' "$2"
+      printf '"obj:%s 0 R": {"stream": {"dict": {}, "datafile": "content-%s.txt"}},\n' "$2" "$3"
+    }
+    {
+      printf '%s\n' '{"qpdf": [{"jsonversion": 2, "pdfversion": "1.7"}, {'
+      printf '%s\n' '"obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},'
+      printf '%s\n' '"obj:2 0 R": {"value": {"/Type": "/Pages", "/Count": 3, "/Kids": ["3 0 R", "5 0 R", "7 0 R"]}},'
+      page 3 4 1
+      page 5 6 2
+      page 7 8 3
+      printf '%s\n' '"obj:9 0 R": {"value": {"/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"}},'
+      printf '%s\n' '"trailer": {"value": {"/Root": "1 0 R", "/Size": 10}}}]}'
+    } > doc.json
+    qpdf --json-input doc.json doc.pdf
+    qpdf --check doc.pdf > check.txt
+    grep -Fq 'No syntax or stream encoding errors found' check.txt
+    test "$(qpdf --show-npages doc.pdf)" = 3
+    pages() {
+      qpdf --qdf --object-streams=disable "$1" pages.qdf
+      LC_ALL=C grep -ao '(Page [0-9])' pages.qdf | tr -d '()\n'
+    }
+    test "$(pages doc.pdf)" = 'Page 1Page 2Page 3'
+    qpdf --split-pages doc.pdf part-%d.pdf
+    for n in 1 2 3; do
+      test "$(pages "part-$n.pdf")" = "Page $n"
+    done
+    qpdf --empty --pages part-3.pdf part-1.pdf part-2.pdf -- merged.pdf
+    test "$(pages merged.pdf)" = 'Page 3Page 1Page 2'
+    qpdf --empty --pages doc.pdf 3,1 -- selected.pdf
+    test "$(pages selected.pdf)" = 'Page 3Page 1'
+    qpdf --rotate=+90:2 doc.pdf rotated.pdf
+    qpdf --qdf --object-streams=disable rotated.pdf rotated.qdf
+    test "$(LC_ALL=C grep -ac '/Rotate 90' rotated.qdf)" = 1
+    qpdf --linearize doc.pdf linearized.pdf
+    qpdf --check-linearization linearized.pdf > linearization.txt
+    grep -Fq 'no linearization errors' linearization.txt
+    # fix-qdf repairs lengths and offsets after a QDF file is edited by hand.
+    qpdf --qdf --object-streams=disable doc.pdf doc.qdf
+    LC_ALL=C sed 's/(Page 2)/(Second page)/' doc.qdf > edited.qdf
+    fix-qdf edited.qdf > fixed.pdf
+    qpdf --check fixed.pdf > fixed.txt
+    qpdf --qdf --object-streams=disable fixed.pdf fixed.qdf
+    LC_ALL=C grep -aq '(Second page)' fixed.qdf
+  - |
+    # AES through OpenSSL, and RC4 for older files through its legacy provider.
+    printf 'BT /F1 24 Tf 72 700 Td (secret) Tj ET\n' > content.txt
+    {
+      printf '%s\n' '{"qpdf": [{"jsonversion": 2, "pdfversion": "1.7"}, {'
+      printf '%s\n' '"obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},'
+      printf '%s\n' '"obj:2 0 R": {"value": {"/Type": "/Pages", "/Count": 1, "/Kids": ["3 0 R"]}},'
+      printf '%s\n' '"obj:3 0 R": {"value": {"/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792], "/Resources": {"/Font": {"/F1": "5 0 R"}}, "/Contents": "4 0 R"}},'
+      printf '%s\n' '"obj:4 0 R": {"stream": {"dict": {}, "datafile": "content.txt"}},'
+      printf '%s\n' '"obj:5 0 R": {"value": {"/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"}},'
+      printf '%s\n' '"trailer": {"value": {"/Root": "1 0 R", "/Size": 6}}}]}'
+    } > plain.json
+    qpdf --json-input plain.json plain.pdf
+    if qpdf --is-encrypted plain.pdf; then exit 1; fi
+    set -- --user-password=user --owner-password=owner
+    qpdf --encrypt "$@" --bits=256 -- plain.pdf aes256.pdf
+    qpdf --encrypt "$@" --bits=128 --use-aes=y -- plain.pdf aes128.pdf
+    qpdf --allow-weak-crypto --encrypt "$@" --bits=128 --use-aes=n -- plain.pdf rc4-128.pdf
+    qpdf --allow-weak-crypto --encrypt "$@" --bits=40 -- plain.pdf rc4-40.pdf
+    # R is the revision of the security handler: 6 is AES-256, 4 is AES-128
+    # here, and 3 and 2 are RC4.
+    for pair in aes256:6 aes128:4 rc4-128:3 rc4-40:2; do
+      f="${pair%%:*}.pdf"
+      qpdf --is-encrypted "$f"
+      qpdf --requires-password "$f"
+      rc=0
+      qpdf --requires-password --password=user "$f" || rc=$?
+      test "$rc" = 3
+      qpdf --show-encryption --password=owner "$f" > encryption.txt
+      grep -Fqx "R = ${pair#*:}" encryption.txt
+      grep -Fqx 'Supplied password is owner password' encryption.txt
+      if qpdf --password=wrong --decrypt "$f" wrong.pdf 2> wrong.err; then exit 1; fi
+      grep -Fq 'invalid password' wrong.err
+      qpdf --password=user --decrypt "$f" decrypted.pdf
+      if qpdf --is-encrypted decrypted.pdf; then exit 1; fi
+      qpdf --qdf --object-streams=disable decrypted.pdf decrypted.qdf
+      LC_ALL=C grep -aq '(secret)' decrypted.qdf
+    done
+    qpdf --show-encryption --password=user aes128.pdf > encryption.txt
+    grep -Fqx 'stream encryption method: AESv2' encryption.txt
+  - |
+    # --optimize-images encodes JPEG with libjpeg; --decode-level=all decodes it again.
+    head -c 4096 /dev/zero | LC_ALL=C tr '\000' '\200' > gray.raw
+    printf 'q 64 0 0 64 72 600 cm /Im1 Do Q\n' > content.txt
+    {
+      printf '%s\n' '{"qpdf": [{"jsonversion": 2, "pdfversion": "1.7"}, {'
+      printf '%s\n' '"obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},'
+      printf '%s\n' '"obj:2 0 R": {"value": {"/Type": "/Pages", "/Count": 1, "/Kids": ["3 0 R"]}},'
+      printf '%s\n' '"obj:3 0 R": {"value": {"/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792], "/Resources": {"/XObject": {"/Im1": "5 0 R"}}, "/Contents": "4 0 R"}},'
+      printf '%s\n' '"obj:4 0 R": {"stream": {"dict": {}, "datafile": "content.txt"}},'
+      printf '%s\n' '"obj:5 0 R": {"stream": {"dict": {"/Type": "/XObject", "/Subtype": "/Image", "/Width": 64, "/Height": 64, "/ColorSpace": "/DeviceGray", "/BitsPerComponent": 8}, "datafile": "gray.raw"}},'
+      printf '%s\n' '"trailer": {"value": {"/Root": "1 0 R", "/Size": 6}}}]}'
+    } > image.json
+    qpdf --json-input --compress-streams=n image.json image.pdf
+    qpdf --optimize-images --oi-min-width=0 --oi-min-height=0 --oi-min-area=0 image.pdf jpeg.pdf
+    qpdf --qdf --object-streams=disable jpeg.pdf jpeg.qdf
+    LC_ALL=C grep -aq '/DCTDecode' jpeg.qdf
+    qpdf --qdf --object-streams=disable --decode-level=all jpeg.pdf decoded.qdf
+    if LC_ALL=C grep -aq '/DCTDecode' decoded.qdf; then exit 1; fi
+    qpdf --check decoded.qdf > decoded.txt
+examples:
+  - title: Merge PDF files into one
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/qpdf --empty --pages first.pdf second.pdf -- merged.pdf
+  - title: Split a PDF into one file per page
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/qpdf --split-pages input.pdf page-%d.pdf
+  - title: Encrypt a PDF with AES-256 and a password to open it
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/qpdf --encrypt --user-password=open-me --owner-password=change-me --bits=256 -- input.pdf encrypted.pdf
+  - title: Linearize a PDF for fast web view
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/qpdf --linearize input.pdf web.pdf
+  - title: Shrink a PDF with Ghostscript (default image)
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint gs ghcr.io/randomcontainers/qpdf -sDEVICE=pdfwrite -dPDFSETTINGS=/ebook -o smaller.pdf input.pdf
+combos:
+  - with: [ghostscript]
+    default: true
+    base: ghostscript
+    summary: qpdf with Ghostscript, for PDF work that also needs rendering, compression or PostScript conversion.
+    test:
+      - |
+        # Ghostscript writes a PDF, qpdf restructures and encrypts it, and Ghostscript reads the result.
+        printf '%s\n' '%!PS' '/F { /Helvetica findfont 24 scalefont setfont } def' \
+          'F 72 700 moveto (First page) show showpage' \
+          'F 72 700 moveto (Second page) show showpage' > two.ps
+        gs -q -sDEVICE=pdfwrite -o two.pdf two.ps
+        qpdf --check two.pdf > check.txt
+        test "$(qpdf --show-npages two.pdf)" = 2
+        qpdf --empty --pages two.pdf 2,1 -- swapped.pdf
+        gs -q -sDEVICE=txtwrite -o - swapped.pdf > swapped.txt
+        test "$(grep -oE 'First page|Second page' swapped.txt | tr '\n' ,)" = 'Second page,First page,'
+        qpdf --linearize --encrypt --user-password=user --owner-password=owner --bits=256 -- two.pdf locked.pdf
+        qpdf --password=user --check-linearization locked.pdf > linearization.txt
+        grep -Fq 'no linearization errors' linearization.txt
+        gs -q -sPDFPassword=user -sDEVICE=txtwrite -o - locked.pdf > locked.txt
+        grep -q 'Second page' locked.txt
+        gs -q -sPDFPassword=user -sDEVICE=png16m -r36 -o page-%d.png locked.pdf
+        test "$(head -c 4 page-2.png | tail -c 3)" = PNG
