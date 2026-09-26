@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS source
+RUN apk add --no-cache gpgv
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://github.com/qpdf/qpdf/releases/download/v${VERSION}/qpdf-${VERSION}.tar.gz /src/
+ADD https://github.com/qpdf/qpdf/releases/download/v${VERSION}/qpdf-${VERSION}.tar.gz.asc /src/
+# qpdf release signing key (Jay Berkenbilt), fingerprint C2C9 6B10 011F E009 E6D1 DF82 8A75 D109 9801 2C7E.
+# A release signed by anyone else fails the gpgv check below until their key is added to keys/qpdf-release.gpg.
+COPY keys/qpdf-release.gpg /tmp/qpdf-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/qpdf-release.gpg "qpdf-${VERSION}.tar.gz.asc" "qpdf-${VERSION}.tar.gz"; \
+    mkdir qpdf; \
+    tar -xzf "qpdf-${VERSION}.tar.gz" -C qpdf --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN apk add --no-cache \
+      build-base \
+      cmake \
+      libjpeg-turbo-dev \
+      openssl-dev \
+      pkgconf \
+      scanelf \
+      zlib-dev
+COPY --link --from=source /src/qpdf /src/qpdf
+WORKDIR /src/qpdf
+ARG JOBS
+# OpenSSL is the only crypto provider, so qpdf's own AES, RC4, MD5 and SHA-2
+# code is not compiled. Only the three programs and the shared library are
+# built; the test, fuzzing and example programs are not.
+RUN set -eu; \
+    set -- \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DUSE_IMPLICIT_CRYPTO=OFF \
+      -DREQUIRE_CRYPTO_OPENSSL=ON \
+      -DBUILD_STATIC_LIBS=OFF \
+      -DINSTALL_EXAMPLES=OFF; \
+    cmake -S . -B build "$@"; \
+    echo "cmake: $*" > /tmp/cmake-options; \
+    cmake --build build -j"${JOBS:-$(nproc)}" --target qpdf fix-qdf zlib-flate; \
+    DESTDIR=/out cmake --install build --strip; \
+    rm -rf /out/usr/local/include /out/usr/local/lib/cmake /out/usr/local/lib/pkgconfig /out/usr/local/share/doc /out/usr/local/share/man
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the so: names the binaries need, minus the libraries
+# built here, plus the packages in runtime-deps.alpine. OpenSSL's legacy
+# provider, which qpdf loads at run time for RC4, is part of libcrypto3.
+RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/qpdf; \
+    mkdir -p "$meta/licenses"; \
+    cp LICENSE.txt NOTICE.md Artistic-2.0 "$meta/licenses/"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://github.com/qpdf/qpdf/releases/download/v${VERSION}/qpdf-${VERSION}.tar.gz" \
+      "https://github.com/qpdf/qpdf/releases/download/v${VERSION}/qpdf-${VERSION}.tar.gz.asc" \
+      > "$meta/source"; \
+    LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/qpdf --version > /tmp/qpdf-version; \
+    test "$(sed -n 1p /tmp/qpdf-version)" = "qpdf version ${VERSION}"; \
+    test "$(LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/qpdf --show-crypto)" = openssl; \
+    test -f /usr/lib/ossl-modules/legacy.so; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(c++ --version | sed -n 1p)"; \
+      cat /tmp/cmake-options; \
+      echo "crypto: openssl"; \
+    } > "$meta/buildinfo"; \
+    scanelf --needed --nobanner --format '%n#p' --recursive /out/usr/local | tr ',' '\n' | sort -u > /tmp/needed; \
+    while read -r so; do \
+      if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
+    done < /tmp/needed > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /usr/local/share/randomcontainers/qpdf/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "qpdf"]
+CMD ["--help"]
