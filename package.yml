@@ -10,7 +10,7 @@ upstream:
   tag-pattern: '^v(\d+\.\d+\.\d+)$'
   version-template: '{1}'
   versioning: semver
-  version: 12.4.1
+  version: 12.4.2
   artifact:
     url: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.tar.gz
     # A clearsigned list of the release files and their SHA-256 hashes.
@@ -18,7 +18,7 @@ upstream:
       url: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.sha256
       algorithm: sha256
     signature: https://github.com/qpdf/qpdf/releases/download/v{version}/qpdf-{version}.tar.gz.asc
-    sha256: f045aa277be2356ff53a89a8622945958291177d2483afc20ede7c8a8cd3873c
+    sha256: 8a58af5b6141319287c1883bec8bd1bd545b7567b7fc5e6ce5d25a1c85f36397
 image:
   entrypoint: [qpdf]
   cmd: [--help]
