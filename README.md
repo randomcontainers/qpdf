@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/qpdf --empty --pages first.pdf second.pdf -- merged.pdf
 ```
 
-The same images can also be pulled as `randomcontainers.com/qpdf`.
-
 Encrypt a PDF with AES-256, so that it needs a password to open:
 
 ```sh
