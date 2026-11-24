@@ -101,7 +101,7 @@ COPY --link --from=build /out/usr/local/ /usr/local/
 # finds it through the cache that ldconfig writes.
 RUN set -eu; \
     apt-get update; \
-    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/qpdf/runtime-deps; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini tzdata < /usr/local/share/randomcontainers/qpdf/runtime-deps; \
     rm -rf /var/lib/apt/lists/*; \
     ldconfig; \
     install -d -m 1777 /work /cache
